@@ -9,6 +9,10 @@
 
 #define FTP_DIR_RESPONSE_SIZE 1024
 
+typedef struct ftp_session {
+    char current_dir[FTP_MAX_PATH_LEN];
+} ftp_session_t;
+
 static const char *ftp_last_path_component(const char *path)
 {
     const char *cursor;
@@ -26,6 +30,94 @@ static const char *ftp_last_path_component(const char *path)
     }
 
     return last_component;
+}
+
+static int ftp_is_absolute_path(const char *path)
+{
+    if (path == NULL || path[0] == '\0') {
+        return 0;
+    }
+
+    if ((path[0] == '\\' && path[1] == '\\') || path[0] == '/' || path[0] == '\\') {
+        return 1;
+    }
+
+    return path[1] == ':';
+}
+
+static int ftp_copy_text(char *output, size_t output_size, const char *text)
+{
+    if (output == NULL || output_size == 0 || text == NULL) {
+        return -1;
+    }
+
+    strncpy(output, text, output_size - 1U);
+    output[output_size - 1U] = '\0';
+    return 0;
+}
+
+static int ftp_resolve_session_path(
+    const ftp_session_t *session,
+    const char *input_path,
+    char *output_path,
+    size_t output_size
+)
+{
+    char combined_path[FTP_MAX_PATH_LEN * 2];
+
+    if (session == NULL || input_path == NULL || input_path[0] == '\0' ||
+        output_path == NULL || output_size == 0) {
+        return -1;
+    }
+
+    if (ftp_is_absolute_path(input_path)) {
+        if (_fullpath(output_path, input_path, output_size) == NULL) {
+            return -1;
+        }
+        return 0;
+    }
+
+    if (snprintf(combined_path, sizeof(combined_path), "%s\\%s", session->current_dir, input_path) < 0) {
+        return -1;
+    }
+
+    if (_fullpath(output_path, combined_path, output_size) == NULL) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int ftp_build_search_pattern(
+    const ftp_session_t *session,
+    char *search_pattern,
+    size_t search_pattern_size
+)
+{
+    if (session == NULL || search_pattern == NULL || search_pattern_size == 0) {
+        return -1;
+    }
+
+    if (snprintf(search_pattern, search_pattern_size, "%s\\*", session->current_dir) < 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int ftp_session_init(ftp_session_t *session)
+{
+    char initial_dir[FTP_MAX_PATH_LEN];
+
+    if (session == NULL) {
+        return -1;
+    }
+
+    if (_getcwd(initial_dir, (int)sizeof(initial_dir)) == NULL) {
+        return -1;
+    }
+
+    return ftp_copy_text(session->current_dir, sizeof(session->current_dir), initial_dir);
 }
 
 static int send_text_line(SOCKET socket_handle, const char *text)
@@ -65,28 +157,32 @@ static int recv_line(SOCKET socket_handle, char *buffer, size_t buffer_size)
     return 0;
 }
 
-static int handle_pwd(SOCKET client_socket)
+static int handle_pwd(SOCKET client_socket, const ftp_session_t *session)
 {
-    char current_dir[FTP_MAX_PATH_LEN];
-
-    if (_getcwd(current_dir, (int)sizeof(current_dir)) == NULL) {
+    if (session == NULL) {
         return send_text_line(client_socket, "ERR failed to get current directory");
     }
-    return send_text_line(client_socket, current_dir);
+
+    return send_text_line(client_socket, session->current_dir);
 }
 
-static int handle_dir(SOCKET client_socket)
+static int handle_dir(SOCKET client_socket, const ftp_session_t *session)
 {
     WIN32_FIND_DATAA find_data;
     HANDLE find_handle;
     char response[FTP_DIR_RESPONSE_SIZE];
+    char search_pattern[FTP_MAX_PATH_LEN + 4];
     size_t used;
+
+    if (ftp_build_search_pattern(session, search_pattern, sizeof(search_pattern)) != 0) {
+        return send_text_line(client_socket, "ERR failed to build directory query");
+    }
 
     memset(response, 0, sizeof(response));
     strncpy(response, "DIR ", sizeof(response) - 1U);
     used = strlen(response);
 
-    find_handle = FindFirstFileA(".\\*", &find_data);
+    find_handle = FindFirstFileA(search_pattern, &find_data);
     if (find_handle == INVALID_HANDLE_VALUE) {
         return send_text_line(client_socket, "ERR failed to list directory");
     }
@@ -125,39 +221,47 @@ static int handle_dir(SOCKET client_socket)
     return send_text_line(client_socket, response);
 }
 
-static int handle_cd(SOCKET client_socket, const char *path)
+static int handle_cd(SOCKET client_socket, ftp_session_t *session, const char *path)
 {
-    char current_dir[FTP_MAX_PATH_LEN];
+    char next_dir[FTP_MAX_PATH_LEN];
+    DWORD attributes;
 
-    if (path == NULL || path[0] == '\0') {
+    if (session == NULL || path == NULL || path[0] == '\0') {
         return send_text_line(client_socket, "ERR missing directory name, usage: cd <dir>");
     }
 
-    if (_chdir(path) != 0) {
+    if (ftp_resolve_session_path(session, path, next_dir, sizeof(next_dir)) != 0) {
         return send_text_line(client_socket, "ERR failed to change directory");
     }
 
-    if (_getcwd(current_dir, (int)sizeof(current_dir)) == NULL) {
-        return send_text_line(client_socket, "ERR changed directory but failed to read current path");
+    attributes = GetFileAttributesA(next_dir);
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0U) {
+        return send_text_line(client_socket, "ERR failed to change directory");
     }
 
-    return send_text_line(client_socket, current_dir);
+    ftp_copy_text(session->current_dir, sizeof(session->current_dir), next_dir);
+    return send_text_line(client_socket, session->current_dir);
 }
 
-static int handle_get(SOCKET client_socket, const char *path)
+static int handle_get(SOCKET client_socket, const ftp_session_t *session, const char *path)
 {
     FILE *file;
     uint8_t buffer[FTP_DATA_CHUNK_SIZE];
     ftp_data_header_t header;
+    char resolved_path[FTP_MAX_PATH_LEN];
     size_t read_size;
     uint32_t sequence_number;
     size_t total_bytes;
 
-    if (path == NULL || path[0] == '\0') {
+    if (session == NULL || path == NULL || path[0] == '\0') {
         return send_text_line(client_socket, "ERR missing file name, usage: get <file>");
     }
 
-    file = fopen(path, "rb");
+    if (ftp_resolve_session_path(session, path, resolved_path, sizeof(resolved_path)) != 0) {
+        return send_text_line(client_socket, "ERR file open failed");
+    }
+
+    file = fopen(resolved_path, "rb");
     if (file == NULL) {
         return send_text_line(client_socket, "ERR file open failed");
     }
@@ -192,30 +296,35 @@ static int handle_get(SOCKET client_socket, const char *path)
     log_message(
         LOG_LEVEL_INFO,
         "ftp get complete: file=%s bytes=%lu chunks=%lu",
-        path,
+        resolved_path,
         (unsigned long)total_bytes,
         (unsigned long)sequence_number
     );
     return 0;
 }
 
-static int handle_put(SOCKET client_socket, const char *path)
+static int handle_put(SOCKET client_socket, const ftp_session_t *session, const char *path)
 {
     FILE *file;
     ftp_data_header_t header;
     uint8_t buffer[FTP_DATA_CHUNK_SIZE];
     nw_ssize_t received;
     uint32_t payload_length;
+    char resolved_path[FTP_MAX_PATH_LEN];
     const char *server_file_name;
     size_t total_bytes;
     uint32_t chunk_count;
 
-    if (path == NULL || path[0] == '\0') {
+    if (session == NULL || path == NULL || path[0] == '\0') {
         return send_text_line(client_socket, "ERR missing file name, usage: put <file>");
     }
 
     server_file_name = ftp_last_path_component(path);
-    file = fopen(server_file_name, "wb");
+    if (ftp_resolve_session_path(session, server_file_name, resolved_path, sizeof(resolved_path)) != 0) {
+        return send_text_line(client_socket, "ERR file create failed");
+    }
+
+    file = fopen(resolved_path, "wb");
     if (file == NULL) {
         return send_text_line(client_socket, "ERR file create failed");
     }
@@ -261,7 +370,7 @@ static int handle_put(SOCKET client_socket, const char *path)
     log_message(
         LOG_LEVEL_INFO,
         "ftp put complete: file=%s bytes=%lu chunks=%lu",
-        server_file_name,
+        resolved_path,
         (unsigned long)total_bytes,
         (unsigned long)chunk_count
     );
@@ -316,6 +425,11 @@ static int handle_client_session(SOCKET client_socket)
 {
     char line[FTP_MAX_COMMAND_LEN];
     ftp_command_t command;
+    ftp_session_t session;
+
+    if (ftp_session_init(&session) != 0) {
+        return -1;
+    }
 
     if (send_text_line(client_socket, "WELCOME custom ftp server") != 0) {
         return -1;
@@ -334,27 +448,27 @@ static int handle_client_session(SOCKET client_socket)
                 }
                 break;
             case FTP_CMD_PWD:
-                if (handle_pwd(client_socket) != 0) {
+                if (handle_pwd(client_socket, &session) != 0) {
                     return -1;
                 }
                 break;
             case FTP_CMD_DIR:
-                if (handle_dir(client_socket) != 0) {
+                if (handle_dir(client_socket, &session) != 0) {
                     return -1;
                 }
                 break;
             case FTP_CMD_CD:
-                if (handle_cd(client_socket, command.argument) != 0) {
+                if (handle_cd(client_socket, &session, command.argument) != 0) {
                     return -1;
                 }
                 break;
             case FTP_CMD_GET:
-                if (handle_get(client_socket, command.argument) != 0) {
+                if (handle_get(client_socket, &session, command.argument) != 0) {
                     return -1;
                 }
                 break;
             case FTP_CMD_PUT:
-                if (handle_put(client_socket, command.argument) != 0) {
+                if (handle_put(client_socket, &session, command.argument) != 0) {
                     return -1;
                 }
                 break;
