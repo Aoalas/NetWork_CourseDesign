@@ -1,6 +1,7 @@
 #include "ftp_app.h"
 
 #include <direct.h>
+#include <process.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,6 +13,11 @@
 typedef struct ftp_session {
     char current_dir[FTP_MAX_PATH_LEN];
 } ftp_session_t;
+
+typedef struct ftp_client_context {
+    SOCKET client_socket;
+    nw_endpoint_t endpoint;
+} ftp_client_context_t;
 
 static const char *ftp_last_path_component(const char *path)
 {
@@ -484,6 +490,37 @@ static int handle_client_session(SOCKET client_socket)
     }
 }
 
+static unsigned __stdcall ftp_client_thread_main(void *arg)
+{
+    ftp_client_context_t *context;
+    int result;
+
+    context = (ftp_client_context_t *)arg;
+    if (context == NULL) {
+        return 0U;
+    }
+
+    log_message(
+        LOG_LEVEL_INFO,
+        "client connected from %s:%u",
+        context->endpoint.host,
+        context->endpoint.port
+    );
+
+    result = handle_client_session(context->client_socket);
+    log_message(
+        LOG_LEVEL_INFO,
+        "client session finished: %s:%u status=%s",
+        context->endpoint.host,
+        context->endpoint.port,
+        result == 0 ? "ok" : "error"
+    );
+
+    nw_close_socket(context->client_socket);
+    free(context);
+    return 0U;
+}
+
 int ftp_server_run(unsigned short port)
 {
     SOCKET server_socket;
@@ -505,8 +542,9 @@ int ftp_server_run(unsigned short port)
     log_message(LOG_LEVEL_INFO, "ftp server listening on port %u", (unsigned int)port);
     for (;;) {
         SOCKET client_socket;
+        ftp_client_context_t *context;
         nw_endpoint_t endpoint;
-        int result;
+        uintptr_t thread_handle;
 
         client_socket = nw_accept_socket(server_socket, &endpoint);
         if (client_socket == INVALID_SOCKET) {
@@ -514,17 +552,25 @@ int ftp_server_run(unsigned short port)
             break;
         }
 
-        log_message(LOG_LEVEL_INFO, "client connected from %s:%u", endpoint.host, endpoint.port);
-        result = handle_client_session(client_socket);
-        log_message(
-            LOG_LEVEL_INFO,
-            "client session finished: %s:%u status=%s",
-            endpoint.host,
-            endpoint.port,
-            result == 0 ? "ok" : "error"
-        );
+        context = (ftp_client_context_t *)calloc(1, sizeof(*context));
+        if (context == NULL) {
+            log_message(LOG_LEVEL_ERROR, "failed to allocate ftp client context");
+            nw_close_socket(client_socket);
+            continue;
+        }
 
-        nw_close_socket(client_socket);
+        context->client_socket = client_socket;
+        context->endpoint = endpoint;
+
+        thread_handle = _beginthreadex(NULL, 0, ftp_client_thread_main, context, 0, NULL);
+        if (thread_handle == 0U) {
+            log_message(LOG_LEVEL_ERROR, "failed to create ftp client thread");
+            nw_close_socket(client_socket);
+            free(context);
+            continue;
+        }
+
+        CloseHandle((HANDLE)thread_handle);
     }
 
     nw_close_socket(server_socket);

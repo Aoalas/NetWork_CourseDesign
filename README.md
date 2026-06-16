@@ -39,6 +39,13 @@ cmake --build build-gcc
 .\build-gcc\network_course_design.exe ftp-client 127.0.0.1
 ```
 
+说明：
+
+- 默认端口约定为 `2493`。
+- 服务端支持多客户端并发接入，并为每个客户端创建独立线程。
+- 每个客户端会话的服务端当前目录彼此独立。
+- 支持 `help`、`pwd`、`dir`、`cd`、`lcd`、`get`、`put`、`quit`。
+
 
 ## 对于课题3
 
