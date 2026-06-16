@@ -15,8 +15,8 @@ static void print_usage(const char *program_name)
 {
     printf("Usage:\n");
     printf("  %s help\n", program_name);
-    printf("  %s ftp-server <port>\n", program_name);
-    printf("  %s ftp-client <host> <port>\n", program_name);
+    printf("  %s ftp-server [port]    (default: %u)\n", program_name, (unsigned int)SERV_PORT);
+    printf("  %s ftp-client <host> [port]    (default: %u)\n", program_name, (unsigned int)SERV_PORT);
     printf("  %s datalink-demo\n", program_name);
     printf("  %s ping <host> [-t]\n", program_name);
     printf("  %s capture demo [tcp|udp|icmp]\n", program_name);
@@ -388,19 +388,27 @@ int main(int argc, char *argv[])
     }
 
     if (strcmp(argv[1], "ftp-server") == 0) {
-        if (argc != 3) {
+        unsigned short port;
+
+        if (argc != 2 && argc != 3) {
             print_usage(argv[0]);
             return 1;
         }
-        return ftp_server_run((unsigned short)atoi(argv[2]));
+
+        port = (argc == 3) ? (unsigned short)atoi(argv[2]) : (unsigned short)SERV_PORT;
+        return ftp_server_run(port);
     }
 
     if (strcmp(argv[1], "ftp-client") == 0) {
-        if (argc != 4) {
+        unsigned short port;
+
+        if (argc != 3 && argc != 4) {
             print_usage(argv[0]);
             return 1;
         }
-        return ftp_client_run(argv[2], (unsigned short)atoi(argv[3]));
+
+        port = (argc == 4) ? (unsigned short)atoi(argv[3]) : (unsigned short)SERV_PORT;
+        return ftp_client_run(argv[2], port);
     }
 
     if (strcmp(argv[1], "datalink-demo") == 0) {

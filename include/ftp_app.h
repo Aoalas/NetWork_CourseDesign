@@ -6,6 +6,8 @@
 #include "network_io.h"
 #include "protocol_structs.h"
 
+#define SERV_PORT 2493
+
 typedef enum ftp_command_type {
     FTP_CMD_INVALID = 0,
     FTP_CMD_HELP,
