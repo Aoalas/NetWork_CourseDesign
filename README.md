@@ -67,7 +67,7 @@ cmake --build build-gcc
 .\build-gcc\network_course_design.exe datalink-demo stopwait 0.00 1 200
 ```
 
-说明：
+实现说明：
 
 - `datalink-demo` 会依次演示停止等待和回退 N 帧（GBN）两种模式。
 - 也可以手动指定模式和参数：`datalink-demo [stopwait|gbn|all] [loss_rate] [window] [timeout_ms]`。
